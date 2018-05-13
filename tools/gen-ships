@@ -1,0 +1,44 @@
+#!/usr/bin/env ruby
+
+require "pathname"
+require "yaml"
+require_relative File.expand_path("../sde", __FILE__)
+
+ships_group_ids = []
+
+Sde.market_groups.each do |id, group|
+  stack = []
+  loop do
+    stack << group["marketGroupID"]
+    group = Sde.market_groups[group["parentGroupID"]]
+    break unless group
+  end
+  ships_group_ids.concat(stack) if stack.last == 4
+end
+
+ships_group_ids.uniq!
+
+ships = Sde.cached("ships-names") do
+  Sde.load_file("fsd/typeIDs.yaml").select do |id, item|
+    ships_group_ids.include?(item["marketGroupID"])
+  end.transform_values do |ship|
+    ship.dig("name", "en")
+  end.values
+end
+
+ships = File.read("./data/ships.txt").lines.map(&:strip) + ships.map(&:upcase)
+ships.uniq!
+
+open('data/eve-universe/src/ships.rs', 'w') do |f|
+  f << %(
+use std::collections::HashMap;
+lazy_static! {
+    pub static ref SHIPS: HashMap<String, ()> = {
+        let mut map = HashMap::new();
+        #{ships.map { |ship| "map.insert(#{ship.inspect}.to_owned(), ());"}.join("\n        ")}
+        map
+    };
+}
+)
+end
+

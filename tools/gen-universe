@@ -1,0 +1,122 @@
+#!/usr/bin/env ruby
+
+require 'pathname'
+require 'json'
+require 'sequel'
+
+unless File.exist? 'tmp/universe.cache'
+  puts 'run make-cache first'
+  exit 1
+end
+
+# rubocop:disable Metrics/AbcSize, Metrics/LineLength, Metrics/CyclomaticComplexity
+def aliases(name)
+  aliases = [name.upcase]
+  return aliases unless name.include? '-'
+  aliases << "#{Regexp.last_match(1)}-#{Regexp.last_match(2)}" if name =~ /^([a-z]).+\-([a-z])/i
+  aliases << "#{Regexp.last_match(1)}#{Regexp.last_match(2)}" if name =~ /^([a-z])\-([a-z])/i
+  aliases << Regexp.last_match(1).to_s if name =~ /^(\w\-\w)/i
+  aliases << Regexp.last_match(1).to_s if name =~ /(\w\-\w)$/i
+  aliases << Regexp.last_match(1).to_s if name =~ /^(\w{2})\w+/i
+  aliases
+end
+# rubocop:enable Metrics/AbcSize, Metrics/LineLength, Metrics/CyclomaticComplexity
+
+SYSTEMS = {} # rubocop:disable Style/MutableConstant
+ROUTES = [] # rubocop:disable Style/MutableConstant
+
+stargates = {}
+names = {}
+
+# rubocop:disable Security/MarshalLoad
+Marshal.load(File.read('tmp/universe.cache')).each do |data|
+  other_names = aliases(data[:name])
+
+  system = {
+    id: data[:id],
+    name: data[:name],
+    constelation: data[:constelation],
+    region: data[:region],
+    aliases: other_names,
+    neighbours: data[:stargates].values
+  }
+
+  SYSTEMS[system[:id]] = system
+  other_names.each do |name|
+    (names[name] ||= []) << system[:id]
+  end
+
+  data[:stargates].each_key do |from|
+    stargates[from] = system
+  end
+end
+# rubocop:enable Security/MarshalLoad
+
+SYSTEMS.each_value do |system|
+  system[:neighbours].map! { |id| stargates.dig(id, :id) }
+end
+
+systems = SYSTEMS.values.sort_by { |a| a[:id] }
+systems.each_with_index do |system, index|
+  system[:index] = index
+end
+
+systems.each do |system|
+  system[:index_neighbours] = system[:neighbours].map { |id| SYSTEMS.dig(id, :index) }
+  system[:index_neighbours].each do |id|
+    self_id = system[:index]
+    ROUTES << [self_id, id].minmax
+  end
+end
+
+ROUTES.uniq!
+
+aliases = systems.each_with_object({}) do |system, a|
+  system[:aliases].each do |name|
+    (a[name] ||= []) << system[:id]
+  end
+end
+
+SYSTEM_FIELDS = {
+  id: ->(value) { value.inspect },
+  name: ->(value) { value.inspect },
+  constelation: ->(value) { value.inspect },
+  region: ->(value) { value.inspect },
+  neighbours: ->(value) { "vec!#{value.inspect}" }
+}.freeze
+
+def system_to_rust(system)
+  attributes = system.select do |key, _value|
+    SYSTEM_FIELDS.include?(key)
+  end
+
+  attributes = attributes.map do |key, value|
+    [key, SYSTEM_FIELDS[key][value]].join(': ')
+  end
+  "System{#{attributes.join(", ")}}"
+end
+
+open('data/eve-universe/src/data.rs', 'w') do |f|
+  f << %(
+use std::collections::HashMap;
+use System;
+lazy_static! {
+    pub static ref SYSTEMS: HashMap<usize, System> = {
+        let mut map = HashMap::new();
+        #{systems.map { |system| "map.insert(#{system[:id]}, #{system_to_rust(system)});"}.join("\n        ")}
+        map
+    };
+}
+
+lazy_static! {
+    pub static ref SYSTEM_NAMES : HashMap<String,Vec<usize>> = {
+        let mut map = HashMap::new();
+        #{aliases.map do |name, ids|
+          %(map.insert("#{name}".to_owned(), vec![#{ids.join(', ')}]);)
+        end.join("\n        ")}
+        map
+    };
+}
+)
+end
+

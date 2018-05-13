@@ -1,7 +1,7 @@
 #![feature(mpsc_select)]
-//#![feature(vec_remove_item)]
+#[macro_use] extern crate lazy_static;
 
-mod chat;
-mod intel;
-pub use chat::Chat;
-pub use chat::ChatBuilder;
+pub mod chat;
+pub mod intel;
+pub mod universe;
+

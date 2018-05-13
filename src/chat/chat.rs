@@ -1,276 +1,116 @@
-extern crate regex;
-use self::regex::Regex;
-
-extern crate notify;
-use self::notify::{Watcher, RecursiveMode, RawEvent, raw_watcher};
-
 use std::path;
 use std::env;
 use std::sync::mpsc;
 use std::thread;
-use chat::ChatFile;
+use chat::channel;
+use chat;
+
+extern crate notify;
+use self::notify::{Watcher, RecursiveMode, RawEvent, raw_watcher};
+
+extern crate regex;
+use self::regex::Regex;
+
+use std::io::Result;
+use std::fs::File;
+use std::io::prelude::*;
+use std::io::{Error, ErrorKind};
 use std::collections::HashMap;
 
-#[derive(Debug)]
-pub struct Message {
-    player: String,
-    channel: String,
-    message: String
-}
+extern crate encoding;
+use self::encoding::{Encoding, DecoderTrap};
+use self::encoding::all::UTF_16LE as UTF16;
 
-#[derive(Debug)]
-struct ChatEvent {
-    path: String,
-    channel: String,
-    version: u64
-}
+type Player = String;
 
-pub struct Chat{
+pub struct Chat {
     directory: path::PathBuf,
-    channels: Vec<String>,
-    players: Vec<String>,
-    chat_files: HashMap<String,ChatFile>,
+    channel_names: Vec<String>,
+    players: Vec<Player>,
+    messages: mpsc::Sender<chat::Event>
 }
 
-impl Default for Chat {
-    fn default() -> Self {
-        Chat{
-            directory: path::PathBuf::from(env::home_dir().expect("should exist")),
-            channels: vec![ "Local".to_owned() ],
-            players: vec![],
-            chat_files: HashMap::new(),
-        }
-    }
-
-}
 
 impl Chat {
-    pub fn start(mut self) -> mpsc::Receiver<Message> {
-        let (tx, rx) = mpsc::channel();
+    pub fn new(messages: mpsc::Sender<chat::Event>) -> Self {
+        let mut path = path::PathBuf::from(env::home_dir().expect("should exist"));
+        path.push("Documents/EVE/logs/Chatlogs");
+        Chat{
+            directory: path,
+            channel_names: vec!["Local".to_owned()],
+            players: vec![],
+            messages: messages
+        }
+    }
+
+    pub fn channel(&mut self, name: &str) {
+        self.channel_names.push(name.to_owned());
+    }
+
+    pub fn player(&mut self, name: &str) {
+        self.players.push(name.to_owned());
+    }
+
+    pub fn run(&mut self) {
         let path = self.directory.to_str().expect("should exist").to_owned();
-        let channels = self.channels.clone();
-        let (events_tx, events_rx) = mpsc::channel();
+        let channel_names = self.channel_names.clone();
+        let (events_tx, events) = mpsc::channel();
+        thread::spawn(move || { watch(path, channel_names, events_tx).is_ok(); });
+        
+        let mut channels = vec![];
 
-        thread::spawn(move || { watch(path, channels, events_tx).is_ok(); });
-
-        thread::spawn(move || {
-            loop {
-                match events_rx.recv() {
-                    Ok(event) => { self.handle_event(event, tx.clone()) },
-                    Err(e) => { println!("{:?}", e) }
-                }
+        for player in self.players.iter() {
+            for name in self.channel_names.iter() {
+                let new_channel = channel::Channel::new(name.to_owned(), player.to_owned(), self.messages.clone());
+                println!("{:?}, {:?}", self.directory.to_str(), new_channel);
+                channels.push(new_channel);
             }
-        });
-        return rx;
-    }
-
-    fn handle_event(&mut self, event: ChatEvent, messages: mpsc::Sender<Message>) {
-        let file = self.chat_file(event);
-
-        for line in file.clone().lines() {
-            let message = Message{
-                player: file.player(),
-                channel: file.name(),
-                message: line.to_owned()
-            };
-            messages.send(message).ok();
         }
 
-    }
-
-    fn chat_file(&mut self, event: ChatEvent) -> &ChatFile {
-        let mut file = ChatFile::from(event.path);
-        let id = file.id();
-        let mut files = self.chat_files.clone();
-        let offset = match files.get(&id) {
-            Some(file) => file.content_length(),
-            None => {
-                if file.name() == "Local" {
-                    0    
-                }else{
-                    file.content_length()
+        loop { 
+            match events.recv() {
+                Ok(event) => { 
+                    let find_channel = |probe: &&mut channel::Channel| {
+                        return probe.name.to_uppercase() == event.name.to_uppercase() && probe.player.to_uppercase() == event.player.to_uppercase() 
+                    };
+                    match channels.iter_mut().find(find_channel) {
+                        Some(channel) => { channel.update(event.content.clone(), event.version); },
+                        None => { return ; }
+                    };
                 }
-            },
-        };
-        file.set_offset(offset);
-        files.insert(id.clone(), file);
-        self.chat_files = files;
-        let file = self.chat_files.get_mut(&id).unwrap();
-        file
-    }
-}
-
-pub struct ChatBuilder {
-    chat: Chat
-}
-
-impl ChatBuilder {
-    pub fn new() -> Self {
-        ChatBuilder{
-            chat: Chat::default()
+                Err(error) => { println!("error: {:?} {}", error, error); break;}
+            };
         }
     }
-
-    pub fn directory(mut self, path: &str) -> Self {
-        self.chat.directory = path::PathBuf::from(path);
-        return self;
-    }
-
-    pub fn channel(mut self, channel: &str) -> Self {
-        self.chat.channels.push(channel.to_owned());
-        return self;
-    }
-    
-    pub fn player(mut self, player: &str) -> Self {
-        self.chat.players.push(player.to_owned());
-        return self;
-    }
-
-    pub fn build(self) -> Chat {
-        return self.chat;
-    }
 }
 
-// extern crate crossbeam_channel;
-//
-// use std::sync::mpsc;
-//
-//
-// use std::vec::Vec;
-//
-// use chat::utf16::UTF16File;
-// use std::io::Read;
-// use std::thread;
-//
-// pub struct Chat {
-//     path: String,
-//     channels: Vec<String>,
-//     players: Vec<String>,
-//     channel_files: HashMap<String, ChannelFile>,
-//     broadcast: mpsc::Sender<Message>,
-//     control_tx: crossbeam_channel::Sender<ControlMessage>,
-//     control_rx: crossbeam_channel::Receiver<ControlMessage>
-// }
-//
-
-
-//
-// impl Chat {
-//
-//     pub fn new(path: &'static str, broadcast: mpsc::Sender<Message>) -> Chat {
-//         let (tx, rx) = crossbeam_channel::unbounded();
-//
-//         Chat{
-//             path: String::from(path),
-//             channels: vec![],
-//             players: vec![],
-//             channel_files: HashMap::new(),
-//             broadcast: broadcast,
-//             control_tx: tx,
-//             control_rx: rx
-//         }
-//     }
-//
-//     pub fn watch_channel(&mut self, channel_name: &'static str) {
-//         self.channels.push(String::from(channel_name));
-//     }
-//
-//     pub fn watch_player(&mut self, player_name: &'static str) {
-//         self.players.push(String::from(player_name));
-//     }
-//
-//     pub fn start(&mut self) {
-//         println!("Watching {}", self.path);
-//         let mut channels = vec![ String::from("Local") ];
-//         channels.append(self.channels.clone().as_mut());
-//         let path = self.path.clone();
-//         let watcher_rx = self.control_rx.clone();
-//         let watcher_tx = self.control_tx.clone();
-//         let consumer_rx = self.control_rx.clone();
-//
-//         thread::spawn(move || {
-//             watch(path, channels, watcher_tx, watcher_rx ).unwrap(); 
-//         });
-//
-//         self.consume_events(consumer_rx);
-//     }
-//
-//     pub fn wait(&self) {
-//     }
-//
-//     fn consume_events(&mut self, rx: crossbeam_channel::Receiver<ControlMessage> ) {
-//         loop {
-//             match rx.recv() {
-//                 Ok(ControlMessage::Event(event)) => { self.file_did_change(event) },
-//                 Ok(ControlMessage::Quit) => break,
-//                 Err(e) => { println!("error: {:?}", e) }
-//             };
-//         };
-//     }
-//
-//     fn file_did_change(&mut self, event: Event) {
-//         let broadcast = self.broadcast.clone();
-//         let file = self.channel_file(event); 
-//         let player_name = file.player_name();
-//         let channel_name = file.channel_name();
-//
-//         for line in file.new_lines() {
-//             let message = Message{
-//                 player: player_name.clone(),
-//                 channel: channel_name.clone(),
-//                 message: line.trim().trim_matches('\u{feff}').to_string()
-//             };
-//             broadcast.send(message).unwrap();
-//         }
-//     }
-//
-//     fn channel_file(&mut self, event: Event) -> &mut ChannelFile {
-//         let new_file = ChannelFile::from(event.path);
-//         let id = new_file.id();
-//         let mut files = self.channel_files.clone();
-//
-//         if ! files.contains_key(&id) {
-//             files.insert(id.clone(), new_file.clone());
-//         }; 
-//
-//         self.channel_files = files;
-//
-//         let file = self.channel_files.get_mut(&id).unwrap();
-//         file.update(new_file);
-//         return file;
-//     }
-// }
-
-//
-fn watch(path: String, channels: Vec<String>, events: mpsc::Sender<ChatEvent>) -> notify::Result<()> 
+fn watch(path: String, channels: Vec<String>, events: mpsc::Sender<ChangeInfo>) -> notify::Result<()> 
 {
 
     let (tx, rx) = mpsc::channel();
     let mut watcher = try!(raw_watcher(tx));
 
     try!(watcher.watch(path, RecursiveMode::Recursive));
-    let regex =  Regex::new(&format!(r"({})_(\d+)_(\d+).TXT$", channels.iter()
+    let pattern = format!(r"({})_(\d+)_(\d+).TXT$", channels.iter()
         .map( |channel| channel.to_uppercase())
         .collect::<Vec<_>>()
-        .join("|"))).expect("must compile");
+        .join("|"));
+
+    println!("{}", pattern);
+    let regex =  Regex::new(&pattern).expect("must compile");
 
     loop {
         match rx.recv() {
             Ok(RawEvent{path: Some(path), op: Ok(_), cookie: _}) => {
                 let normalized_path = String::from(path.to_str().expect("must exist"));
                 let upcase_path = normalized_path.to_uppercase();
+
                 if regex.is_match(&upcase_path) {
-                    let parts = regex.captures(&upcase_path).expect("should match");
-                    let version = format!("{}{}",
-                        parts.get(2).map_or("".to_string(), |m| m.as_str().to_string()),
-                        parts.get(3).map_or("".to_string(), |m| m.as_str().to_string())
-                    ).parse::<u64>().unwrap();
-                    let event = ChatEvent{
-                        path: normalized_path,
-                        channel: parts.get(1).map_or("".to_string(), |m| m.as_str().to_string()),
-                        version: version, 
-                    };
-                    events.send(event).unwrap();
+
+                    println!("watch({})", normalized_path);
+                    let mut info = change_info(&normalized_path, &regex); 
+                    println!("{:?}", info);
+                    events.send(info).is_ok();
                 }
             },
             Ok(event) => println!("broken event: {:?}", event),
@@ -278,3 +118,61 @@ fn watch(path: String, channels: Vec<String>, events: mpsc::Sender<ChatEvent>) -
         }
     }
 }
+
+const CHANNEL_NAME: &'static str = "Channel Name";
+const CHANNEL_LISTENER: &'static str = "Listener";
+const CHANNEL_HEADER_PATTERN: &'static str = "---------------------------------------------------------------";
+
+#[derive(Clone, Debug)]
+pub struct ChangeInfo {
+    pub player: String,
+    pub name: String,
+    pub content: String,
+    path: String,
+    pub version: u64
+}
+
+pub fn change_info(file_name: &str, version_regex: &Regex) -> ChangeInfo {
+    let content = String::from_utf8(read_utf16(file_name).unwrap_or(vec![])).expect("ok charset");
+    let mut parts = content.splitn(3, CHANNEL_HEADER_PATTERN);
+    let headers = parse_channel_headers(parts.nth(1).unwrap_or(&"".to_owned()).to_owned());
+    let upcase_path = file_name.to_uppercase();
+    let version_parts = version_regex.captures(&upcase_path).expect("should match");
+    let version = format!("{}{}",
+        version_parts.get(2).map_or("".to_string(), |m| m.as_str().to_string()),
+        version_parts.get(3).map_or("".to_string(), |m| m.as_str().to_string())
+    ).parse::<u64>().unwrap_or(0);
+
+    ChangeInfo {
+        name: headers.get(CHANNEL_NAME).unwrap_or(&"".to_owned()).to_owned(),
+        player: headers.get(CHANNEL_LISTENER).unwrap_or(&"".to_owned()).to_owned(),
+        content: parts.nth(0).unwrap_or(&"".to_owned()).to_owned(),
+        version: version,
+        path: file_name.to_owned()
+    }
+}
+
+pub fn read_utf16(path: &str) -> Result<Vec<u8>> {
+    let mut file = try!(File::open(path));
+    let mut buf: Vec<u8> = vec![]; 
+    try!(file.read_to_end(&mut buf));
+    drop(file);
+    match UTF16.decode(&buf, DecoderTrap::Ignore) {
+        Ok(content) => { Ok(content.into_bytes()) } ,
+        Err(e) => return Err(Error::new(ErrorKind::Other, e)),
+    }
+}
+
+fn parse_channel_headers(content: String) -> HashMap<String, String> {
+    let mut headers : HashMap<String, String> = HashMap::new();
+    for line in content.lines() {
+        let normalized_line = line.trim();
+        if normalized_line.is_empty() { continue }
+        let mut parts = normalized_line.splitn(2, ":");
+        let key = parts.nth(0).unwrap().to_string();
+        let value = parts.nth(0).unwrap().trim().to_string();
+        headers.insert(key, value); 
+    }
+    return headers;
+}
+

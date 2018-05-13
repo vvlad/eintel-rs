@@ -1,0 +1,27 @@
+#!/usr/bin/env ruby
+
+require 'pathname'
+require 'yaml'
+
+SDE_PATH = Pathname(ARGV.first || './sde')
+FSD_PATH = SDE_PATH.join('fsd/universe')
+
+cache = []
+
+Dir["#{FSD_PATH}/eve/*/*/*/solarsystem.staticdata"].each do |file|
+  data = YAML.load_file(file)
+  file.delete_prefix!("#{FSD_PATH}/eve/")
+  file.delete_suffix!('/solarsystem.staticdata')
+
+  location = *file.split('/')
+
+  cache << {
+    id: data['solarSystemID'],
+    stargates: data['stargates'].transform_values { |v| v['destination'] },
+    region: location[0],
+    constelation: location[1],
+    name: location[2]
+  }
+end
+
+File.write('tmp/cache/universe.cache', Marshal.dump(cache))

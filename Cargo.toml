@@ -8,4 +8,12 @@ notify = "4.0.0"
 regex = "0.2"
 encoding = "0.2"
 lazy_static = "1.0.0"
-crossbeam-channel = "0.1"
+rust-embed = "0.3.0"
+serde_json = "*"
+serde_derive = "*"
+serde = "*"
+algorithms = { git = "https://github.com/vvlad/rust-algorithms.git" }
+r2d2_sqlite = "*"
+r2d2 = "*"
+rusqlite = "*"
+eve-universe = { path = "data/eve-universe" }

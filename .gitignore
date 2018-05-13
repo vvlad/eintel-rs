@@ -4,3 +4,8 @@
 
 /target
 **/*.rs.bk
+/sde
+
+/data/eve-universe/target
+/tmp
+/data/eintel.sqlite3
