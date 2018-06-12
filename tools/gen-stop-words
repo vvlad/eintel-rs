@@ -1,0 +1,20 @@
+#!/usr/bin/env ruby
+
+require "pathname"
+require "yaml"
+
+words = File.read("data/stop_words.txt").each_line.map(&:strip)
+
+open('data/eve-universe/src/stop_words.rs', 'w') do |f|
+  f << %(
+use std::collections::HashSet;
+lazy_static! {
+    pub static ref STOP_WORDS: HashSet<String> = {
+        let mut set = HashSet::new();
+        #{words.map { |word| "set.insert(#{word.inspect}.to_owned());"}.join("\n        ")}
+        set
+    };
+}
+)
+end
+

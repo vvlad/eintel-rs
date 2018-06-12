@@ -1,104 +1,143 @@
-extern crate rusqlite;
-extern crate eve_universe;
+use std::collections::HashMap;
+use std::fs::File;
 
-use std::collections::{HashSet, HashMap};
-use self::eve_universe::*;
+extern crate bson;
+use self::bson::{decode_document, Bson};
+extern crate serde;
 
-pub fn is_system_name(token: &String) -> bool {
-    SYSTEM_NAMES.get(token).is_some()
+lazy_static! {
+    static ref UNIVERSE: Universe = {
+        match init() {
+            Some(universe) => universe,
+            None => panic!("unable to load universe"),
+        }
+    };
 }
 
-pub fn find_systems(names: &Vec<String>) -> Vec<System> {
-    
-    names.iter()
-      .map(|name| SYSTEM_NAMES.get(&name.to_uppercase()) )
-      .filter( |result| result.is_some() )
-      .flat_map( |result| result.unwrap() )
-      .collect::<HashSet<_>>()
-      .iter()
-      .map( |index| SYSTEMS[index].clone() )
-      .collect::<Vec<_>>()
-
+fn init() -> Option<Universe> {
+    let mut file = File::open("universe.bson").ok()?;
+    let doc = decode_document(&mut file).ok()?;
+    match bson::from_bson(Bson::Document(doc)) {
+        Ok(universe) => {
+            return Some(universe);
+        }
+        Err(e) => {
+            println!("unable to load 'universe.bson'. Reason: {}", e);
+            return None;
+        }
+    };
 }
 
-pub fn find(name: String) -> System {
-    SYSTEM_NAMES.get(&name)
-      .unwrap()
-      .iter()
-      .map( |index| SYSTEMS[index].clone() )
-      .filter( |system| system.name == name ).nth(0).unwrap()
+#[derive(Clone, Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
+pub struct System {
+    pub id: String,
+    pub name: String,
+    pub constelation: String,
+    pub region: String,
+    pub neighbours: Vec<String>,
+}
+
+impl System {
+    pub fn find(name: &str) -> Option<System> {
+        UNIVERSE
+            .system_aliases
+            .get(&name.to_string().to_uppercase())?
+            .iter()
+            .find(|&name| UNIVERSE.systems.contains_key(name))
+            .map(|name| UNIVERSE.systems.get(name).unwrap().clone())
+    }
+
+    pub fn get(id: &str) -> System {
+        UNIVERSE.systems.get(id).unwrap().clone()
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Universe {
+    pub systems: HashMap<String, System>,
+    pub system_aliases: HashMap<String, Vec<String>>,
+    pub ships: Vec<String>,
+    pub stop_words: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Route {
     pub systems: Vec<System>,
-    pub distance: i16,
+    pub distance: u16,
     pub destination: System,
-    pub source: System
+    pub source: System,
 }
 
-fn unwrap_node<T: Clone>(node: Option<&Option<T>> ) -> Option<T> {
-    if let Some(value) = node.cloned() {
-        if let Some(node) = value {
-            Some(node)
-        }else{
-            None
-        }
-    } else {
-        None
-    }
+#[inline]
+fn unwrap_node<T: Clone>(node: Option<&Option<T>>) -> Option<T> {
+    Some(node.cloned()??)
 }
+
+#[inline]
+pub fn ship_exists(name: &str) -> bool {
+    UNIVERSE.ships.contains(&name.to_uppercase())
+}
+
+#[inline]
+pub fn is_stop_word(word: &str) -> bool {
+    UNIVERSE.stop_words.contains(&word.to_uppercase())
+}
+
 pub fn route(source: &System, destination: &System) -> Option<Route> {
     if source.neighbours.len() == 0 || destination.neighbours.len() == 0 {
-        return None
+        return None;
     }
-    let (pred, succ, w) = walk(source.id as usize, destination.id as usize);
-    let mut path : Vec<usize> = vec![];
+    let (pred, succ, w) = walk(&source.id, &destination.id);
+    let mut path: Vec<String> = vec![];
     let mut node = Some(w);
 
     while node.is_some() {
         let value = node.take().unwrap();
+        node = unwrap_node(pred.get(&value));
         path.push(value);
-        node = unwrap_node(pred.get(&value))
     }
 
     path.reverse();
-    
-    node = Some(*path.last().unwrap());
+
+    node = Some(path.last().unwrap().to_string());
     while node.is_some() {
         let value = node.take().unwrap();
-        path.push(value);
         node = unwrap_node(succ.get(&value));
+        path.push(value);
     }
 
-    let mut system_path = path.iter().map( |id| SYSTEMS[id].clone() ).collect::<Vec<_>>();
+    let mut system_path = path
+        .iter()
+        .map(|id| System::get(id).clone())
+        .collect::<Vec<_>>();
+
     system_path.dedup();
-    let len = system_path.len() as i16;
-    if system_path.len() > 0 {
-        Some(Route{
+    let len = system_path.len() as u16;
+    if len > 0 {
+        Some(Route {
             systems: system_path,
-            distance: len,
+            distance: len - 1,
             destination: destination.clone(),
-            source: source.clone()
+            source: source.clone(),
         })
-    }else{
-        None 
+    } else {
+        None
     }
 }
 
-type GraphPath = HashMap<usize, Option<usize>>;
+type GraphPath = HashMap<String, Option<String>>;
 
-pub fn walk(source: usize, destination: usize) -> (GraphPath, GraphPath, usize) {
-    let mut forward = vec![source];
-    let mut backward = vec![destination];
+fn walk(source: &str, destination: &str) -> (GraphPath, GraphPath, String) {
+    let mut forward = vec![source.to_string()];
+    let mut backward = vec![destination.to_string()];
     let mut pred: GraphPath = HashMap::new();
     let mut succ: GraphPath = HashMap::new();
- 
-    pred.insert(source, None);
-    succ.insert(destination, None);
+
+    pred.insert(source.to_string(), None);
+    succ.insert(destination.to_string(), None);
 
     if source == destination {
-        return (pred, succ, source);
+        return (pred, succ, source.to_string());
     }
 
     while forward.len() > 0 && backward.len() > 0 {
@@ -106,34 +145,33 @@ pub fn walk(source: usize, destination: usize) -> (GraphPath, GraphPath, usize) 
             let current = forward;
             forward = vec![];
             for v in current.iter() {
-                for w in SYSTEMS[v].neighbours.iter() {
+                for w in System::get(v).neighbours.iter() {
                     if pred.get(w).is_none() {
-                        forward.push(*w);
-                        pred.insert(*w,Some(*v));
+                        forward.push(w.to_string());
+                        pred.insert(w.to_string(), Some(v.to_string()));
                     }
-                    if succ.contains_key(&w) {
-                        return (pred, succ, *w);
+                    if succ.contains_key(w) {
+                        return (pred, succ, w.to_string());
                     }
                 }
             }
-        }else{
+        } else {
             let current = backward;
             backward = vec![];
 
             for v in current.iter() {
-                for w in SYSTEMS[v].neighbours.iter() {
+                for w in System::get(v).neighbours.iter() {
                     if succ.get(w).is_none() {
-                        backward.push(*w);
-                        succ.insert(*w,Some(*v));
+                        backward.push(w.to_string());
+                        succ.insert(w.to_string(), Some(v.to_string()));
                     }
                     if pred.contains_key(w) {
-                        return (pred, succ, *w);
+                        return (pred, succ, w.clone());
                     }
                 }
             }
         }
-    };
+    }
 
-    return (HashMap::default(), HashMap::default(), 0)
+    return (HashMap::default(), HashMap::default(), String::default());
 }
-

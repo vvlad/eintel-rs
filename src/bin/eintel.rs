@@ -1,28 +1,53 @@
 extern crate eintel;
 
-use eintel::chat;
-use eintel::intel;
+extern crate pretty_env_logger;
+#[macro_use]
+extern crate log;
+
+use eintel::Channels;
+use eintel::{AudioNotification, Event, IntelChannel, LocalChannel, NotificationService};
 use std::sync::mpsc;
 use std::thread;
 
 pub fn main() {
-    let (chat_channel, chat_messages) = mpsc::channel();
-    let mut intel = intel::Intel::new();
-    let mut chat = chat::Chat::new(chat_channel);
+    pretty_env_logger::init();
+    log::set_max_level(log::LevelFilter::Trace);
 
-    chat.channel("Derzerek");
-    chat.channel("GotG Home Intel");
-    chat.player("Derzerek");
+    let (tx, rx) = mpsc::channel();
+    let local = LocalChannel::new(tx.clone());
+    let mut intel = IntelChannel::new(tx.clone());
+    let notifications = NotificationService::new();
+    let audio_notification = AudioNotification::new();
+    debug!("Before sound notification");
+    audio_notification.notify("eIntel Online");
 
-    let (intel_channel, intel_messages) = mpsc::channel();
-
-    thread::spawn(move|| intel.run(intel_messages));
-    thread::spawn(move|| chat.run());
+    thread::spawn(|| {
+        debug!("Channel thread running");
+        Channels::new()
+            .player("Derzerek")
+            .player("Yolla")
+            .name("GotG Home Intel")
+            .name("Derzerek")
+            .watch(tx);
+    });
 
     loop {
-        match chat_messages.recv() {
-            Ok(event) => { intel_channel.send(event).is_ok(); },
-            Err(_) => { println!("Test"); }
-        }
+        match rx.recv() {
+            Ok(Event::ChannelResumed(mut channel)) => if channel.is_local() {
+                local.process(&mut channel);
+            },
+            Ok(Event::ChannelChanged(mut channel)) => if channel.is_local() {
+                local.process(&mut channel);
+            } else {
+                intel.process(&mut channel);
+            },
+            Ok(Event::LocationChanged(location)) => intel.new_location(location),
+            Ok(Event::IntelReport(message)) => notifications.notify(message),
+            Ok(event) => warn!("Unknown event: {:?}", event),
+            Err(e) => {
+                error!("{:?}: {}", e, e);
+                return;
+            }
+        };
     }
 }
