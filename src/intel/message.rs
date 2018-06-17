@@ -1,73 +1,49 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::mpsc;
+use super::chat;
+use super::universe;
+use std::collections::HashSet;
 
-use universe;
-use {ChannelInfo, Event, IntelMessage, PlayerLocation, System, ThreatAssetment};
-extern crate regex;
-
-pub struct IntelChannel {
-    events: mpsc::Sender<Event>,
-    player_locations: HashMap<String, PlayerLocation>,
-    regex: regex::Regex,
+#[derive(Debug, Clone)]
+pub enum ThreatAssetment {
+    Unknown,
+    NoThreat(universe::System),
+    ProximityIrelevant(u16),
+    ProximityAlertLow(u16),
+    ProximityAlertHigh(u16),
+    ProximityAlertCritical(u16),
+    StatusRequest(universe::System),
 }
 
-impl IntelChannel {
-    pub fn new(channel: mpsc::Sender<Event>) -> Self {
-        IntelChannel {
-            events: channel,
-            player_locations: HashMap::new(),
-            regex: regex::Regex::new(r"^\[ \d{4}\.\d{2}\.\d{2} \d{2}:\d{2}:\d{2} \] (.+) > (.*)")
-                .expect("must compile"),
-        }
-    }
-
-    pub fn new_location(&mut self, location: PlayerLocation) {
-        info!("{} is in {}", location.player, location.system.name);
-        self.player_locations
-            .insert(location.player.clone(), location);
-    }
-
-    pub fn process(&mut self, info: &mut ChannelInfo) -> Option<()> {
-        let location = self.player_locations.get(&info.player())?;
-        let messages = info.messages();
-        for message in messages {
-            if let Some(matches) = self.regex.captures(&message) {
-                let sender = matches.get(1)?.as_str().to_string();
-                if sender == "EVE System" {
-                    continue;
-                };
-                let line = matches.get(2)?.as_str().trim().to_owned();
-                let message = self.debounce(IntelMessage::new(line, &location, sender)?)?;
-                self.events.send(Event::IntelReport(message)).is_ok();
-            }
-        }
-        Some(())
-    }
-
-    fn debounce(&self, message: IntelMessage) -> Option<IntelMessage> {
-        Some(message)
-    }
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub message: String,
+    pub player: String,
+    pub tokens: Vec<String>,
+    pub route: universe::Route,
+    pub origin: universe::System,
+    pub involved_players: Vec<String>,
+    pub threat_assement: ThreatAssetment,
+    pub sender: String,
 }
 
-impl IntelMessage {
-    pub fn new(message: String, location: &PlayerLocation, sender: String) -> Option<Self> {
-        let line = normalize(&message);
+impl Message {
+    pub fn new(message: chat::Message, location: &universe::System) -> Option<Message> {
+        let line = normalize(&message.message);
         let tokens = tokenize(line.clone());
-        let (route, tokens) = Self::route(&tokens, &location.system);
+        let (route, tokens) = Self::route(&tokens, &location);
         let system = route.as_ref().map(|r| r.destination.clone());
         let (threat_level, tokens) = assess_thread_level(tokens, &route);
         let players = possible_names(line.clone());
 
         Some({
-            IntelMessage {
-                player: location.player.clone(),
-                message: message,
+            Message {
+                player: message.listener.clone(),
+                message: message.message.clone(),
                 tokens: tokens,
                 route: route?,
                 origin: system?,
                 involved_players: players,
                 threat_assement: threat_level,
-                sender: sender,
+                sender: message.sender.clone(),
             }
         })
     }
@@ -81,7 +57,7 @@ impl IntelMessage {
             .iter()
             .map(|ref mut token| {
                 let x = token.clone();
-                System::find(&token).and_then(|system| {
+                universe::System::find(&token).and_then(|system| {
                     system_names.insert(x);
                     Some(system)
                 })
@@ -133,7 +109,7 @@ fn normalize(text: &str) -> String {
 fn possible_names(line: String) -> Vec<String> {
     line.split("  ")
         .map(|token| token.to_string())
-        .filter(|token| !System::find(token).is_some())
+        .filter(|token| !universe::System::find(token).is_some())
         .filter(ships)
         .filter(stop_words)
         .map(|token| token.to_string())

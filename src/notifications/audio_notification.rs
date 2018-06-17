@@ -1,4 +1,4 @@
-use tts::TTSService;
+use notifications::tts::TTSService;
 extern crate alto;
 extern crate lewton;
 
@@ -62,7 +62,9 @@ fn sound_loop() -> mpsc::Sender<Sound> {
     let context = sound_context();
 
     thread::spawn(move || loop {
-        let mut stream = context.new_streaming_source().expect("cloud not create streaming src");
+        let mut stream = context
+            .new_streaming_source()
+            .expect("cloud not create streaming src");
         let mut play_time = 0.0 as f32;
 
         if let Ok(sound) = rx.try_recv() {
@@ -74,10 +76,11 @@ fn sound_loop() -> mpsc::Sender<Sound> {
             play_time += sound.bytes.len() as f32 / sound.rate as f32;
             stream.play();
         }
-        
+
         let sleep_time = if play_time > 0.0 {
-            time::Duration::from_millis((play_time * 1000.0) as u64) + time::Duration::from_millis(10)
-        }else{
+            time::Duration::from_millis((play_time * 1000.0) as u64)
+                + time::Duration::from_millis(10)
+        } else {
             time::Duration::from_millis(50)
         };
 
