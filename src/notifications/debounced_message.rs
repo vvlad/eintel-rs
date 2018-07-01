@@ -6,6 +6,7 @@ use super::Notification;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time;
 
@@ -41,19 +42,24 @@ impl DebounceMessages {
         let (tx, rx) = mpsc::channel();
         let tick = tx.clone();
         let audio = AudioNotification::new();
+        let queue: Arc<Mutex<HashSet<DebouncedMessage>>> = Arc::new(Mutex::new(HashSet::new()));
+        let q = queue.clone();
         thread::spawn(move || loop {
             thread::sleep(time::Duration::from_millis(200));
-            tick.send(DebounceMessages::Tick).is_ok();
+            let q = queue.lock().unwrap();
+            if q.len() > 0 {
+                tick.send(DebounceMessages::Tick).is_ok();
+            }
         });
 
-        thread::spawn(move || {
-            let mut queue: HashSet<DebouncedMessage> = HashSet::new();
-
-            loop {
-                match rx.recv() {
-                    Ok(DebounceMessages::Intel(intel)) => {
-                        let debounced = DebouncedMessage::new(intel);
-                        let message = if let Some(existing) = queue.take(&debounced) {
+        let queue = q;
+        thread::spawn(move || loop {
+            match rx.recv() {
+                Ok(DebounceMessages::Intel(intel)) => {
+                    let debounced = DebouncedMessage::new(intel);
+                    {
+                        let mut q = queue.lock().unwrap();
+                        let message = if let Some(existing) = q.take(&debounced) {
                             if existing.0.route.distance > debounced.0.route.distance {
                                 existing
                             } else {
@@ -62,28 +68,29 @@ impl DebounceMessages {
                         } else {
                             debounced
                         };
-                        queue.insert(message);
+                        q.insert(message);
                     }
-                    Ok(DebounceMessages::Tick) => {
-                        for message in queue.drain() {
-                            let notification = Notification::from(message.0.clone());
-                            match notification {
-                                Notification::Sound(text) => {
-                                    audio.notify(&text);
-                                }
-                                Notification::Desktop(text) => {
-                                    desktop_notification(&text, &message.0.message);
-                                }
-                                Notification::None => {}
-                            };
-                        }
+                }
+                Ok(DebounceMessages::Tick) => {
+                    let mut q = queue.lock().unwrap();
+                    for message in q.drain() {
+                        let notification = Notification::from(message.0.clone());
+                        match notification {
+                            Notification::Sound(text) => {
+                                audio.notify(&text);
+                            }
+                            Notification::Desktop(text) => {
+                                desktop_notification(&text, &message.0.message);
+                            }
+                            Notification::None => {}
+                        };
                     }
-                    Err(error) => {
-                        error!("{:?}: {}", error, error);
-                        return;
-                    }
-                };
-            }
+                }
+                Err(error) => {
+                    error!("{:?}: {}", error, error);
+                    return;
+                }
+            };
         });
 
         tx
